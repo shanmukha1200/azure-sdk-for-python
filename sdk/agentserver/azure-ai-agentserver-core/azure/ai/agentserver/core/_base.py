@@ -23,7 +23,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import _config, _tracing
+from . import _config, _supervisor, _tracing
 from ._middleware import InboundRequestLoggingMiddleware
 from ._request_id import RequestIdMiddleware as _RequestIdMiddleware
 from ._server_version import build_server_version
@@ -490,14 +490,44 @@ class AgentServerHost(Starlette):
     def run(self, host: str = "0.0.0.0", port: Optional[int] = None) -> None:
         """Start the server synchronously.
 
+        Default behaviour serves the app directly. In hosted environments the
+        platform may set ``AGENTSERVER_SUPERVISOR=1``, in which case this
+        process transparently becomes a thin parent that owns the platform
+        port, answers ``GET /readiness`` itself (probing the worker and
+        returning ``424`` when it is unresponsive), and runs the real server in
+        a supervised worker subprocess that is respawned on crash — so a
+        durable-task container recovers automatically with no customer code or
+        awareness. The public surface is unchanged either way.
+
         :param host: Network interface to bind. Defaults to ``"0.0.0.0"``.
         :type host: str
         :param port: Port to bind. Defaults to ``PORT`` env var or 8088.
         :type port: Optional[int]
         """
+        resolved_port = _config.resolve_port(port)
+
+        # The supervised worker child always serves directly on its internal
+        # PORT; the sentinel wins over any supervisor request to avoid
+        # infinite re-supervision.
+        if not _supervisor.should_run_as_worker() and _supervisor.resolve_supervision():
+            internal_port = _supervisor.resolve_internal_port(resolved_port)
+            exit_code = _supervisor.run_supervisor(host, resolved_port, internal_port)
+            if exit_code:
+                raise SystemExit(exit_code)
+            return
+
+        self._run_direct(host, resolved_port)
+
+    def _run_direct(self, host: str, resolved_port: int) -> None:
+        """Serve ``self`` directly on the given port (no supervisor).
+
+        :param host: Network interface to bind.
+        :type host: str
+        :param resolved_port: Already-resolved port to bind.
+        :type resolved_port: int
+        """
         from hypercorn.asyncio import serve as _hypercorn_serve
 
-        resolved_port = _config.resolve_port(port)
         logger.info("AgentServerHost starting on %s:%s", host, resolved_port)
         config = self._build_hypercorn_config(host, resolved_port)
 

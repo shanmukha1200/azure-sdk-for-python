@@ -1,4 +1,5 @@
-# Docker-build staging dir — populated by ./build.sh which copies
-# the checked-in wheels from sdk/agentserver/wheels/ into here. Never
-# committed: source of truth is the central wheels directory.
-src/durable-research-agent/wheels/
+# azd environment (local state — never commit)
+.azure/
+
+# Demo client runtime
+.demo-session
